@@ -4,12 +4,12 @@ from datetime import datetime
 import pandas as pd
 import requests_cache
 import openmeteo_requests
-from attrs import field, define
+from attrs import field, define, validators
 from retry_requests import retry
 
-from h2integrate.core.validators import range_val
-from h2integrate.resource.resource_base import ResourceBaseAPIConfig
-from h2integrate.resource.wind.wind_resource_base import WindResourceBaseAPIModel
+from h2integrate.resource.resource_base import ResourceBaseAPIModel, ResourceBaseAPIConfig
+from h2integrate.resource.wind.wind_resource_base import WindResourceBase
+from h2integrate.resource.utilities.download_tools import make_time_index_openmeteo
 
 
 @define(kw_only=True)
@@ -38,18 +38,17 @@ class OpenMeteoHistoricalWindAPIConfig(ResourceBaseAPIConfig):
 
     """
 
-    resource_year: int = field(converter=int, validator=range_val(1940, datetime.now().year - 1))
+    resource_year: int = field(
+        converter=int, validator=(validators.ge(1940), validators.le(datetime.now().year - 1))
+    )
     include_leap_day: bool = field(default=False)
     dataset_desc: str = "openmeteo_archive"
     resource_type: str = "wind"
     valid_intervals: list[int] = field(factory=lambda: [60])
-    resource_data: dict | object = field(default={})
-    resource_filename: Path | str = field(default="")
-    resource_dir: Path | str | None = field(default=None)
     verify_download: bool = field(default=False)
 
 
-class OpenMeteoHistoricalWindResource(WindResourceBaseAPIModel):
+class OpenMeteoHistoricalWindResource(WindResourceBase, ResourceBaseAPIModel):
     def setup(self):
         # create the input dictionary for OpenMeteoHistoricalWindAPIConfig
         resource_specs = self.helper_setup_method()
@@ -179,11 +178,16 @@ class OpenMeteoHistoricalWindResource(WindResourceBaseAPIModel):
 
         # Make time column in ISO 8601 format
         time_data = pd.date_range(
-            start=pd.to_datetime(hourly_data.Time(), unit="s"),
-            end=pd.to_datetime(hourly_data.TimeEnd(), unit="s"),
+            start=pd.to_datetime(hourly_data.Time(), unit="s", utc=True),
+            end=pd.to_datetime(hourly_data.TimeEnd(), unit="s", utc=True),
             freq=pd.Timedelta(seconds=hourly_data.Interval()),
             inclusive="left",
         )
+
+        if response.UtcOffsetSeconds() != 0:
+            # Data downloaded for local time
+            # convert timestamps to local time
+            time_data = time_data.tz_convert(response.Timezone().decode())
 
         # Convert timeseries data to a DataFrame
         df = pd.DataFrame(ts_data, index=time_data)
@@ -235,8 +239,8 @@ class OpenMeteoHistoricalWindResource(WindResourceBaseAPIModel):
     def load_data(self, fpath):
         """Load data from a file and format as a dictionary that:
 
-        1) follows naming convention described in WindResourceBaseAPIModel.
-        2) is converted to standardized units described in WindResourceBaseAPIModel.
+        1) follows naming convention described in WindResourceBase.
+        2) is converted to standardized units described in WindResourceBase.
 
         This method does the following steps:
 
@@ -273,8 +277,14 @@ class OpenMeteoHistoricalWindResource(WindResourceBaseAPIModel):
 
         data = pd.read_csv(fpath, header=2)
 
+        time = make_time_index_openmeteo(
+            data,
+            header_dict["timezone"],
+            float(header_dict["latitude"]),
+            float(header_dict["longitude"]),
+        )
+
         # Make time columns
-        time = pd.DatetimeIndex(data["time"])
         data["Year"] = time.year
         data["Month"] = time.month
         data["Day"] = time.day
@@ -296,7 +306,7 @@ class OpenMeteoHistoricalWindResource(WindResourceBaseAPIModel):
         # update wind resource data with site data
         data.update(site_data)
 
-        return data
+        return data | {"units": data_units}
 
     def format_timeseries_data(self, data):
         """Convert data to a dictionary with keys that follow the standardized naming convention and

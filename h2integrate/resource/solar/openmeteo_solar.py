@@ -5,12 +5,12 @@ import numpy as np
 import pandas as pd
 import requests_cache
 import openmeteo_requests
-from attrs import field, define
+from attrs import field, define, validators
 from retry_requests import retry
 
-from h2integrate.core.validators import range_val
-from h2integrate.resource.resource_base import ResourceBaseAPIConfig
-from h2integrate.resource.solar.solar_resource_base import SolarResourceBaseAPIModel
+from h2integrate.resource.resource_base import ResourceBaseAPIModel, ResourceBaseAPIConfig
+from h2integrate.resource.utilities.download_tools import make_time_index_openmeteo
+from h2integrate.resource.solar.solar_resource_base import SolarResourceBase
 
 
 @define(kw_only=True)
@@ -23,12 +23,6 @@ class OpenMeteoHistoricalSolarAPIConfig(ResourceBaseAPIConfig):
             Must been between 1940 the year before the current calendar year. (inclusive).
         include_leap_day (bool, optional): If False, remove data from leap day if the
             resource_year is a leap year. Otherwise, leave leap day data in. Defaults to False.
-        resource_data (dict | object, optional): Dictionary of user-input resource data.
-            Defaults to an empty dictionary.
-        resource_dir (str | Path, optional): Folder to save resource files to or
-            load resource files from. Defaults to "".
-        resource_filename (str, optional): Filename to save resource data to or load
-            resource data from. Defaults to None.
         verify_download (bool, optional): Whether to verify the API download from the url.
             If an `openmeteo_requests.Client.OpenMeteoRequestsError` error is thrown,
             try setting to True. Defaults to False.
@@ -43,18 +37,17 @@ class OpenMeteoHistoricalSolarAPIConfig(ResourceBaseAPIConfig):
 
     """
 
-    resource_year: int = field(converter=int, validator=range_val(1940, datetime.now().year - 1))
+    resource_year: int = field(
+        converter=int, validator=(validators.ge(1940), validators.le(datetime.now().year - 1))
+    )
     include_leap_day: bool = field(default=False)
     dataset_desc: str = "openmeteo_archive_solar"
     resource_type: str = "solar"
     valid_intervals: list[int] = field(factory=lambda: [60])
-    resource_data: dict | object = field(default={})
-    resource_filename: Path | str = field(default="")
-    resource_dir: Path | str | None = field(default=None)
     verify_download: bool = field(default=False)
 
 
-class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
+class OpenMeteoHistoricalSolarResource(SolarResourceBase, ResourceBaseAPIModel):
     def setup(self):
         # create the input dictionary for OpenMeteoHistoricalSolarAPIConfig
         resource_specs = self.helper_setup_method()
@@ -97,7 +90,8 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
             # "solar_zenith_angle": "deg",
             "snow_depth": "m",
             "rain": "mm",  # "precipitable_water": "cm",
-            "albedo": "percent",
+            "albedo": "unitless",
+            "is_day": "unitless",
         }
         # get the data dictionary
         data = self.get_data(self.config.latitude, self.config.longitude)
@@ -143,8 +137,10 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
         Returns:
             str: url to use for API call.
         """
+
         start_year = int(self.config.resource_year - 1)
         end_year = int(self.config.resource_year + 1)
+
         input_data = {
             "latitude": latitude,
             "longitude": longitude,
@@ -186,11 +182,16 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
 
         # Make time column in ISO 8601 format
         time_data = pd.date_range(
-            start=pd.to_datetime(hourly_data.Time(), unit="s"),
-            end=pd.to_datetime(hourly_data.TimeEnd(), unit="s"),
+            start=pd.to_datetime(hourly_data.Time(), unit="s", utc=True),
+            end=pd.to_datetime(hourly_data.TimeEnd(), unit="s", utc=True),
             freq=pd.Timedelta(seconds=hourly_data.Interval()),
             inclusive="left",
         )
+
+        if response.UtcOffsetSeconds() != 0:
+            # Data downloaded for local time
+            # convert timestamps to local time
+            time_data = time_data.tz_convert(response.Timezone().decode())
 
         # Convert timeseries data to a DataFrame
         df = pd.DataFrame(ts_data, index=time_data)
@@ -242,8 +243,8 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
     def load_data(self, fpath):
         """Load data from a file and format as a dictionary that:
 
-        1) follows naming convention described in SolarResourceBaseAPIModel.
-        2) is converted to standardized units described in SolarResourceBaseAPIModel.
+        1) follows naming convention described in SolarResourceBase.
+        2) is converted to standardized units described in SolarResourceBase.
 
         This method does the following steps:
 
@@ -280,8 +281,13 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
 
         data = pd.read_csv(fpath, header=2)
 
+        time = make_time_index_openmeteo(
+            data,
+            header_dict["timezone"],
+            float(header_dict["latitude"]),
+            float(header_dict["longitude"]),
+        )
         # Make time columns
-        time = pd.DatetimeIndex(data["time"])
         data["Year"] = time.year
         data["Month"] = time.month
         data["Day"] = time.day
@@ -303,7 +309,7 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
         # update solar resource data with site data
         data.update(site_data)
 
-        return data
+        return data | {"units": data_units}
 
     def format_timeseries_data(self, data):
         """Convert data to a dictionary with keys that follow the standardized naming convention and
@@ -340,8 +346,13 @@ class OpenMeteoHistoricalSolarResource(SolarResourceBaseAPIModel):
         for c in data_cols_init:
             units = c.split("(")[-1].strip(")").replace("°", "deg").replace("%", "unitless")
             units = (
-                units.replace("undefined", "unitless").replace("m²", "m**2").replace("degC", "C")
+                units.replace("undefined", "unitless").replace(
+                    "m²", "m**2"
+                )  # .replace("degC", "C")
             )
+
+            if units == "C":
+                units = "degC"
 
             new_c = c.split("(")[0].replace("air", "").replace("at ", "")
             new_c = new_c.replace(f"({units})", "").strip().replace(" ", "_").replace("__", "_")
