@@ -9,7 +9,14 @@ from h2integrate.converters.hydrogen.h2_fuel_cell import (
     LinearH2FuelCellPerformanceModel,
     H2FuelCellCostModel,
 )
+from h2integrate.converters.hydrogen.PEM_h2_fuel_cell import (
+    PEMH2FuelCellPerformanceModel,
+)
 from h2integrate.converters.hydrogen.steam_methane_reformer import (
     SteamMethaneReformerPerformanceModel,
     SteamMethaneReformerCostModel,
+)
+from h2integrate.converters.hydrogen.htse_electrolyzer import (
+    HTSEPerformanceModel,
+    HTSECostModel,
 )

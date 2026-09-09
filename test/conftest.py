@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from h2integrate import EXAMPLE_DIR
-from h2integrate.resource.utilities.nlr_developer_api_keys import set_nlr_key_dot_env
+from h2integrate.resource.utilities.nlr_developer_api_keys import get_nlr_developer_api_credential
 
 
 def pytest_sessionstart(session):
@@ -18,10 +18,6 @@ def pytest_sessionstart(session):
         os.environ["TMP_OPENMDAO_REPORTS"] = initial_om_report_setting
 
     os.environ["OPENMDAO_REPORTS"] = "none"
-
-    # Set a dummy API key
-    os.environ["NLR_API_KEY"] = "a" * 40
-    set_nlr_key_dot_env()
 
     # Set RESOURCE_DIR to None so pulls example files from default DIR
     initial_resource_dir = os.getenv("RESOURCE_DIR")
@@ -32,6 +28,14 @@ def pytest_sessionstart(session):
         os.environ["TEMP_RESOURCE_DIR"] = f"{initial_resource_dir}"
 
     os.environ.pop("RESOURCE_DIR", None)
+
+    # If the user provided an NLR_API_KEY, save it to a temp variable
+    if (initial_nlr_api_key := os.getenv("NLR_API_KEY")) is not None:
+        os.environ["TEMP_NLR_API_KEY"] = f"{initial_nlr_api_key}"
+
+    # Set a dummy API key
+    os.environ["NLR_API_KEY"] = "a" * 40
+    _ = get_nlr_developer_api_credential(which="key", set_vars=True)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -44,6 +48,13 @@ def pytest_sessionfinish(session, exitstatus):
         os.environ["RESOURCE_DIR"] = user_dir
     os.environ.pop("TEMP_RESOURCE_DIR", None)
 
+    # if the user provided an nlr_api_key, load it from the temp variable
+    # and reset the original environment variable to prevent unexpected
+    # behavior after running tests
+    if (user_api_key := os.getenv("TEMP_NLR_API_KEY")) is not None:
+        os.environ["NLR_API_KEY"] = user_api_key
+    os.environ.pop("TEMP_NLR_API_KEY", None)
+
     initial_om_report_setting = os.getenv("TMP_OPENMDAO_REPORTS")
     if initial_om_report_setting is not None:
         os.environ["OPENMDAO_REPORTS"] = initial_om_report_setting
@@ -54,7 +65,7 @@ def pytest_collection_modifyitems(config, items):
     """Enforce the usage marking tests as either unit, regression, or integration tests.
     This method will need to be imported into all subsequent ``contest.py`` files.
     """
-    test_types = {"unit", "regression", "integration"}
+    test_types = {"unit", "regression", "integration", "hpc"}
     missing_type_mark = [
         f"{item.path}::{item.name}"
         for item in items
@@ -63,8 +74,8 @@ def pytest_collection_modifyitems(config, items):
     if missing_type_mark:
         errors = "\n".join(missing_type_mark)
         msg = (
-            "The following tests must be marked as either 'unit', 'regression', or 'integration'"
-            f" tests using `@pytest.mark.<test-type>`:\n{errors}"
+            "The following tests must be marked as either 'unit', 'regression', "
+            f"'integration', or 'hpc' tests using `@pytest.mark.<test-type>`:\n{errors}"
         )
         raise pytest.UsageError(msg)
 

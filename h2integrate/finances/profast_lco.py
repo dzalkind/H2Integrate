@@ -2,6 +2,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+from openmdao.utils.units import simplify_unit
 
 from h2integrate.finances.tools import _compute_price_units
 from h2integrate.core.dict_utils import dict_to_yaml_formatting
@@ -42,13 +43,6 @@ class ProFastLCO(ProFastBase):
         price_<commodity> (float): First-year selling price of the commodity in the same units
             as LCOx.
         ``<LCOx>_breakdown`` (dict): Annualized breakdown of LCO costs by category.
-
-    Methods:
-        add_model_specific_outputs(): Creates model outputs for the LCO and associated financial
-            metrics, including cost breakdowns.
-        compute(inputs, outputs, discrete_inputs, discrete_outputs): Runs the ProFAST simulation,
-            calculates the LCO and financial outputs, generates breakdowns, and optionally exports
-            configuration and results to files.
 
     Notes:
 
@@ -110,7 +104,7 @@ class ProFastLCO(ProFastBase):
 
         io_meta_data = self.get_io_metadata()
         self.price_units = io_meta_data[self.LCO_str]["units"]
-        self.commodity_amount_units = self.price_units.replace("USD/", "").strip("()")
+        self.commodity_amount_units = simplify_unit(f"USD/({self.price_units})")
 
         pf = self.populate_profast(inputs)
 

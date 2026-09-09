@@ -1,4 +1,7 @@
-from openmdao.utils.units import convert_units
+from collections.abc import Iterable
+
+import numpy as np
+from openmdao.utils.units import convert_units, simplify_unit
 
 from h2integrate.finances.tools import _compute_rate_units
 from h2integrate.finances.profast_base import ProFastBase
@@ -40,7 +43,8 @@ class ProFastNPV(ProFastBase):
 
         Retrieves the commodity sell price and its units from the plant configuration
         and registers it as an input for the component. Calls the base `setup()` method
-        to initialize other ProFAST inputs and outputs.
+        to initialize other ProFAST inputs and outputs. The commodity sell price can be
+        either a scalar value or a list with the same length as plant life.
 
         Raises:
             ValueError: If `commodity_sell_price` or `commodity_sell_price_units` is not
@@ -53,8 +57,6 @@ class ProFastNPV(ProFastBase):
         self.commodity_sell_price = model_inputs.get("commodity_sell_price", None)
         self.commodity_sell_price_units = model_inputs.get("commodity_sell_price_units", None)
 
-        if self.commodity_sell_price is None:
-            raise ValueError("commodity_sell_price is missing as an input")
         if self.commodity_sell_price_units is None:
             raise ValueError(
                 "commodity_sell_price_units is missing as an input. "
@@ -65,9 +67,22 @@ class ProFastNPV(ProFastBase):
 
         super().setup()
 
+        if self.commodity_sell_price is None:
+            raise ValueError("commodity_sell_price is missing as an input")
+
+        if isinstance(self.commodity_sell_price, Iterable):
+            if len(self.commodity_sell_price) != int(self.params.plant_life):
+                raise ValueError(
+                    f"`commodity_sell_price` has an invalid length of "
+                    f"{len(self.commodity_sell_price)}. `commodity_sell_price`"
+                    f"must be the same length as the plant life ({self.params.plant_life}) "
+                    "or a single value."
+                )
+
         self.add_input(
             f"sell_price_{self.output_txt}",
             val=self.commodity_sell_price,
+            shape=int(self.params.plant_life),
             units=self.commodity_sell_price_units,
         )
 
@@ -83,9 +98,7 @@ class ProFastNPV(ProFastBase):
         """
         io_meta_data = self.get_io_metadata()
         self.price_units = io_meta_data[f"sell_price_{self.output_txt}"]["units"]
-        self.commodity_amount_units = self.commodity_sell_price_units.replace("USD/", "").strip(
-            "()"
-        )
+        self.commodity_amount_units = simplify_unit(f"USD/({self.price_units})")
 
         # compute rate_units from the price
         rate_units_from_price = _compute_rate_units(
@@ -112,6 +125,8 @@ class ProFastNPV(ProFastBase):
         else:
             pf = self.populate_profast(inputs)
 
-        outputs[f"NPV_{self.output_txt}"] = pf.cash_flow(
-            price=inputs[f"sell_price_{self.output_txt}"][0]
+        non_op_Nyears = int(np.ceil(self.params.installation_time / 12) + 1)
+        sell_profile = np.concatenate(
+            [np.zeros(non_op_Nyears), inputs[f"sell_price_{self.output_txt}"]]
         )
+        outputs[f"NPV_{self.output_txt}"] = pf.cash_flow(price=sell_profile)
